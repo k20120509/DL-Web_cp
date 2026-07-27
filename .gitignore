@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# PyInstaller
+build/
+dist/
+*.spec
+
+# Windows
+*.lnk
+Thumbs.db
+.DS_Store
+*.bak
+
+# Downloads
+downloads/
+*.mp4
+*.flv
+*.webm
+*.mkv
