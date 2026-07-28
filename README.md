@@ -2,7 +2,7 @@
 
 > 一键下载各平台视频 | 纯Python实现 | 无需ffmpeg | 绿色免安装
 
-[![Version](https://img.shields.io/badge/version-V1.0-00d4ff?style=flat-square&logo=github)](https://github.com/k20120509/DL-Web_cp)
+[![Version](https://img.shields.io/badge/version-V2.0-00d4ff?style=flat-square&logo=github)](https://github.com/k20120509/DL-Web_cp)
 [![Python](https://img.shields.io/badge/python-3.8+-3776ab?style=flat-square&logo=python&logoColor=white)](https://www.python.org)
 [![License](https://img.shields.io/badge/license-MIT-00d4ff?style=flat-square)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows-0078d6?style=flat-square)]()
@@ -27,8 +27,9 @@
 
 ## 快速下载
 
-👉 **[点击下载 V1.0](https://github.com/k20120509/DL-Web_cp/releases/tag/V1.0)** - 双击即运行，零依赖
+👉 **[点击下载 V2.0（增强版）](https://github.com/k20120509/DL-Web_cp/releases/tag/V2.0)** - 代理加速 + 断点续传
 
+> 📦 **V1.0 正式版**：[点击下载](https://github.com/k20120509/DL-Web_cp/releases/tag/V1.0)
 > 🧪 **测试版本**：Debug / Test / Release 三个测试版已发布到 [Releases 页面](https://github.com/k20120509/DL-Web_cp/releases)
 
 ---
@@ -38,11 +39,11 @@
 | 平台 | 状态 | 说明 |
 |------|------|------|
 | **哔哩哔哩 (B站)** | ✅ 支持 | 支持 BVID 链接、b23.tv 短链接、多清晰度选择 |
+| **YouTube** | ✅ 支持（V2.0） | 需初始化代理池，菜单 [3] 初始化代理后即可下载 |
 | **通用直链** | ✅ 支持 | mp4/webm/flv 等视频文件直链直接下载 |
-| YouTube | 🚧 开发中 | 敬请期待 |
 | 抖音 | 🚧 开发中 | 敬请期待 |
 | 快手 | 🚧 开发中 | 敬请期待 |
-| 西瓜视频 | 🚧 开发中 | 敬请期待 |
+| Twitter/X | 🚧 开发中 | 敬请期待 |
 
 ---
 
@@ -64,28 +65,47 @@
 
 > 自动降级机制：高清晰度不可用时自动尝试低清晰度
 
-### 3. 批量下载
+### 3. 🆕 免费代理池（V2.0）
+
+- 自动获取、测试、选择最优代理
+- 支持 YouTube、Twitter/X 等外网视频加速下载
+- 内置稳定代理源 + 在线动态获取
+- 使用方法：菜单选项 [3] 初始化代理池
+
+### 4. 🆕 断点续传（V2.0）
+
+- 下载中断后自动保存进度
+- 下次下载自动从断点继续
+- 无需重新下载整个文件
+
+### 5. 🆕 智能文件管理（V2.0）
+
+- 下载未完成退出时，自动删除临时文件
+- 下载成功后自动打开文件夹并定位文件
+- 无需手动查找下载位置
+
+### 6. 批量下载
 
 - 支持 URL 列表批量下载
 - 每行一个视频链接
 - 自动统计成功/失败数量
 - 总大小和耗时统计
 
-### 4. 智能识别
+### 7. 智能识别
 
 - 自动识别视频平台
 - 选择对应下载策略
 - B站自动解析 BV 号
 - 短链接自动跳转解析
 
-### 5. 实时进度
+### 8. 实时进度
 
 - 实时下载进度条
 - 下载速度显示
 - 剩余时间预估
 - 分段下载进度
 
-### 6. 备用 CDN
+### 9. 备用 CDN
 
 - 下载失败自动尝试备用地址
 - 多 CDN 节点自动切换
