@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-DL-Web CP V2.0 - 增强版视频下载器
+DL-Web CP V2.5 - 增强版视频下载器
 支持: 哔哩哔哩、YouTube、抖音、Twitter/X、直链
-功能: 免费代理池、断点续传、多线程并发、自动清理未完成文件
+功能: 稳定代理池、断点续传、多线程并发、自动清理、智能定位
 """
 
 import os
@@ -22,7 +22,7 @@ from typing import Optional, Dict, List, Tuple, Callable
 from dataclasses import dataclass
 import subprocess
 
-VERSION = "V2.0"
+VERSION = "V2.5"
 
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -107,123 +107,164 @@ class ProxyInfo:
 
 
 class ProxyPool:
-    """免费代理池 - 自动获取、测试、选择最优代理"""
+    """稳定代理池 - 多源获取、严格测试、优先级选择"""
     
-    # 内置免费代理源（稳定可靠）
-    BUILTIN_PROXIES = [
-        # 免费代理列表（定期更新）
-        ("45.77.191.182", 8080),
-        ("185.199.229.156", 7306),
-        ("185.199.228.220", 7306),
-        ("185.199.227.186", 7306),
-        ("185.199.226.156", 7306),
-        ("149.34.189.31", 4047),
-        ("82.102.8.107", 8080),
-        ("91.107.132.76", 8080),
-        ("159.89.195.93", 8080),
-        ("165.225.38.96", 10605),
+    # 使用多个免费代理 API 和 GitHub 源
+    PROXY_SOURCES = [
+        # 知名免费代理 API
+        "https://api.proxyscrape.com/v3/free-proxy-list/get?request=display_proxies&proxy_format=ipport&format=text",
+        "https://www.proxy-list.download/api/v1/get?type=http",
+        "https://api.openproxylist.xyz/http.txt",
+        # GitHub 上维护的优质列表
+        "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt",
+        "https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/proxy.txt",
+        "https://raw.githubusercontent.com/clarketm/proxy-list/master/proxy-list-raw.txt",
+        "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt",
+        "https://raw.githubusercontent.com/pawru/proxy-list/main/proxies/http.txt",
+    ]
+    
+    # 国内备用（不需要代理的场景）
+    RESIDENTIAL_PROXIES = [
+        "117.68.195.145:18881",
+        "218.75.126.36:9000",
+        "101.34.53.72:8118",
+        "222.95.50.201:8089",
+        "114.231.45.136:18118",
+        "113.134.174.153:8888",
+        "112.74.205.244:8888",
+        "120.27.198.182:8888",
     ]
     
     def __init__(self):
         self.proxies: List[ProxyInfo] = []
         self.lock = threading.Lock()
         self.best_proxy: Optional[ProxyInfo] = None
-        self.test_url = "https://www.google.com/favicon.ico"
-        self.timeout = 5.0
+        self.test_urls = [
+            "https://www.youtube.com",
+            "https://www.google.com",
+            "http://binlog.cn",
+        ]
+        self.timeout = 8.0
         self._initialized = False
     
     def initialize(self):
-        """初始化代理池"""
+        """初始化代理池（获取+测试）"""
         if self._initialized:
             return
         
-        log("初始化代理池...", "INFO")
+        log("=" * 60, "INFO")
+        log("初始化代理池，正在获取代理列表...", "INFO")
         
-        # 添加内置代理
-        for host, port in self.BUILTIN_PROXIES:
-            self.proxies.append(ProxyInfo(host=host, port=port))
+        # 1. 获取所有代理
+        raw_proxies = self._fetch_all_proxies()
+        log(f"共获取到 {len(raw_proxies)} 个原始代理", "INFO")
         
-        # 尝试从在线源获取更多代理
-        self._fetch_online_proxies()
+        if not raw_proxies:
+            log("未获取到任何代理，使用本地备用列表", "WARN")
+            raw_proxies = self.RESIDENTIAL_PROXIES.copy()
         
-        # 测试所有代理
-        self._test_all_proxies()
+        # 2. 去重和过滤
+        unique_proxies = list(set(raw_proxies))
+        log(f"去重后共 {len(unique_proxies)} 个代理，开始测试...", "INFO")
         
-        # 选择最优代理
+        # 3. 并发测试所有代理
+        log("正在并发测试代理可用性（可能需要 20-40 秒）...", "INFO")
+        self.proxies = self._test_all_proxies(unique_proxies)
+        log(f"测试完成，可用代理: {len(self.proxies)} 个", "INFO")
+        
+        # 4. 选择最优
         self._select_best_proxy()
         
         self._initialized = True
         
         if self.best_proxy:
-            log(f"代理池就绪，当前最优: {self.best_proxy.url} ({self.best_proxy.latency:.2f}s)", "SUCCESS")
+            log(f"代理池就绪！", "SUCCESS")
+            log(f"  最优代理: {self.best_proxy.host}:{self.best_proxy.port} (延迟 {self.best_proxy.latency:.2f}s)", "SUCCESS")
+            log(f"  可用数量: {len(self.proxies)}", "SUCCESS")
         else:
-            log("代理池未找到可用代理，将使用直连", "WARN")
+            log("所有代理均不可用，将使用直连下载", "WARN")
+        log("=" * 60, "INFO")
     
-    def _fetch_online_proxies(self):
-        """从在线源获取代理"""
-        sources = [
-            "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt",
-            "https://raw.githubusercontent.com/clarketm/proxy-list/master/proxy-list-raw.txt",
-        ]
+    def _fetch_all_proxies(self) -> List[str]:
+        """从所有源获取代理"""
+        all_proxies = []
         
-        for source in sources:
+        # 添加内置备用
+        all_proxies.extend(self.RESIDENTIAL_PROXIES)
+        
+        # 从在线源获取
+        for source_url in self.PROXY_SOURCES:
             try:
                 import requests
-                r = requests.get(source, timeout=10)
+                r = requests.get(source_url, timeout=10, headers={"User-Agent": USER_AGENT})
                 if r.status_code == 200:
-                    lines = r.text.strip().split("\n")
-                    count = 0
-                    for line in lines[:50]:  # 限制数量
-                        line = line.strip()
-                        if ":" in line:
-                            parts = line.split(":")
-                            if len(parts) == 2:
-                                try:
-                                    host = parts[0]
-                                    port = int(parts[1])
-                                    if port > 0 and port < 65536:
-                                        self.proxies.append(ProxyInfo(host=host, port=port))
-                                        count += 1
-                                except Exception:
-                                    pass
-                    if count > 0:
-                        log(f"从 {source.split('/')[-1]} 获取 {count} 个代理", "INFO")
+                    text = r.text.strip()
+                    if text:
+                        lines = text.split("\n")
+                        for line in lines:
+                            line = line.strip()
+                            if ":" in line and len(line.split(":")) == 2:
+                                all_proxies.append(line)
+                        if lines:
+                            log(f"  从 {source_url.split('/')[-1] if '/' in source_url else source_url[:30]} 获取到 {len(lines)} 个", "INFO")
             except Exception:
-                pass
+                continue
+        
+        return all_proxies
     
-    def _test_all_proxies(self):
+    def _test_all_proxies(self, proxy_list: List[str]) -> List[ProxyInfo]:
         """并发测试所有代理"""
-        if not self.proxies:
-            return
+        tested_proxies = []
+        test_count = min(len(proxy_list), 80)  # 最多测试80个，避免太久
         
-        log(f"测试 {len(self.proxies)} 个代理...", "INFO")
-        
-        def test_proxy(proxy: ProxyInfo) -> Optional[ProxyInfo]:
+        def test_single_proxy(proxy_str: str) -> Optional[ProxyInfo]:
+            parts = proxy_str.split(":")
+            if len(parts) != 2:
+                return None
             try:
-                import requests
-                proxies = {"http": proxy.url, "https": proxy.url}
-                start = time.time()
-                r = requests.get(self.test_url, proxies=proxies, timeout=self.timeout, verify=False)
-                elapsed = time.time() - start
-                if r.status_code < 400:
-                    proxy.latency = elapsed
-                    proxy.success_count += 1
-                    proxy.last_check = time.time()
-                    return proxy
+                host = parts[0]
+                port = int(parts[1])
+                if port <= 0 or port > 65535:
+                    return None
+                
+                info = ProxyInfo(host=host, port=port)
+                proxy_url = info.url
+                
+                # 使用多个测试URL轮流测试
+                for test_url in self.test_urls[:2]:
+                    try:
+                        import requests
+                        proxies = {"http": proxy_url, "https": proxy_url}
+                        start = time.time()
+                        r = requests.get(test_url, proxies=proxies, timeout=self.timeout, verify=False)
+                        elapsed = time.time() - start
+                        if r.status_code < 400:
+                            info.latency = elapsed
+                            info.success_count += 1
+                            info.last_check = time.time()
+                            return info
+                    except Exception:
+                        continue
+                info.fail_count += 1
+                return None
             except Exception:
-                proxy.fail_count += 1
-            return None
+                return None
         
-        valid_proxies = []
-        with ThreadPoolExecutor(max_workers=20) as executor:
-            futures = {executor.submit(test_proxy, p): p for p in self.proxies}
+        log(f"  并发测试 {test_count} 个代理...", "INFO")
+        test_subset = proxy_list[:test_count]
+        
+        with ThreadPoolExecutor(max_workers=30) as executor:
+            futures = {executor.submit(test_single_proxy, p): p for p in test_subset}
+            completed = 0
             for future in as_completed(futures):
                 result = future.result()
                 if result:
-                    valid_proxies.append(result)
+                    tested_proxies.append(result)
+                completed += 1
+                if completed % 10 == 0:
+                    log(f"  进度: {completed}/{test_count}", "INFO")
         
-        self.proxies = valid_proxies
-        log(f"可用代理: {len(self.proxies)} 个", "INFO")
+        return tested_proxies
     
     def _select_best_proxy(self):
         """选择最优代理"""
@@ -231,7 +272,8 @@ class ProxyPool:
             self.best_proxy = None
             return
         
-        self.proxies.sort(key=lambda p: p.score)
+        # 按延迟排序
+        self.proxies.sort(key=lambda p: p.latency)
         self.best_proxy = self.proxies[0] if self.proxies else None
     
     def get_proxy(self) -> Optional[Dict]:
@@ -244,22 +286,35 @@ class ProxyPool:
         return None
     
     def report_success(self, proxy_url: str):
-        """报告代理成功"""
+        """报告代理成功 - 提升优先级"""
         with self.lock:
             for p in self.proxies:
                 if p.url == proxy_url:
                     p.success_count += 1
+                    # 延迟降低优先
+                    if p.latency > 0.1:
+                        p.latency *= 0.95
                     self._select_best_proxy()
                     break
     
     def report_failure(self, proxy_url: str):
-        """报告代理失败"""
+        """报告代理失败 - 降低优先级"""
         with self.lock:
             for p in self.proxies:
                 if p.url == proxy_url:
                     p.fail_count += 1
+                    # 延迟增加
+                    p.latency *= 1.5
+                    if p.fail_count >= 3:
+                        # 移除失败3次的代理
+                        self.proxies.remove(p)
                     self._select_best_proxy()
                     break
+    
+    def get_all_proxies(self) -> List[Dict]:
+        """获取所有可用代理列表（用于轮询）"""
+        with self.lock:
+            return [{"http": p.url, "https": p.url} for p in self.proxies]
 
 
 PROXY_POOL = ProxyPool()
@@ -452,7 +507,7 @@ PROGRESS = DownloadProgress()
 # ===================== 下载会话 =====================
 
 def build_session(use_proxy: bool = False):
-    """构建下载会话"""
+    """构建下载会话（支持代理自动切换）"""
     import requests
     from requests.adapters import HTTPAdapter
     from urllib3.util.retry import Retry
@@ -464,17 +519,23 @@ def build_session(use_proxy: bool = False):
         "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
     })
     
-    # 配置代理
+    # 配置代理池支持
     if use_proxy:
         proxy = PROXY_POOL.get_proxy()
         if proxy:
             s.proxies.update(proxy)
+            # 添加代理旋转支持
+            s._use_proxy_pool = True
+        else:
+            s._use_proxy_pool = False
+    else:
+        s._use_proxy_pool = False
     
-    # 重试策略
+    # 重试策略（增加对代理失败的容忍）
     retry = Retry(
         total=5,
-        backoff_factor=0.5,
-        status_forcelist=(500, 502, 503, 504),
+        backoff_factor=1.0,
+        status_forcelist=(500, 502, 503, 504, 429),
         allowed_methods=frozenset(["GET", "HEAD"])
     )
     adapter = HTTPAdapter(pool_connections=32, pool_maxsize=64, max_retries=retry)
@@ -482,6 +543,38 @@ def build_session(use_proxy: bool = False):
     s.mount("https://", adapter)
     
     return s
+
+
+def download_with_fallback(session, url, **kwargs):
+    """带有代理回退机制的下载"""
+    import requests as req
+    try:
+        response = session.get(url, **kwargs)
+        response.raise_for_status()
+        # 报告代理成功
+        if getattr(session, '_use_proxy_pool', False) and session.proxies:
+            for p in PROXY_POOL.proxies:
+                if p.url == session.proxies.get('http', ''):
+                    PROXY_POOL.report_success(p.url)
+                    break
+        return response
+    except Exception as e:
+        # 如果使用了代理，尝试切换到其他代理
+        if getattr(session, '_use_proxy_pool', False):
+            PROXY_POOL.report_failure(session.proxies.get('http', ''))
+            # 尝试下一个可用代理
+            all_proxies = PROXY_POOL.get_all_proxies()
+            for proxy in all_proxies:
+                try:
+                    session.proxies.update(proxy)
+                    response = session.get(url, **kwargs)
+                    response.raise_for_status()
+                    PROXY_POOL.report_success(proxy['http'])
+                    return response
+                except Exception:
+                    PROXY_POOL.report_failure(proxy['http'])
+                    continue
+        raise e
 
 
 # ===================== 基础下载器 =====================
@@ -939,11 +1032,12 @@ def get_downloader(url: str) -> Optional[BaseDownloader]:
 # ===================== 批量下载 =====================
 
 def batch_download(urls: List[str], save_dir: str, quality: str = "720P") -> List[Tuple]:
-    """批量下载多个视频（并发）"""
+    """批量下载多个视频（并发下载，默认3个并发）"""
     save_dir = Path(save_dir).resolve()
     save_dir.mkdir(parents=True, exist_ok=True)
     
     results = []
+    max_workers = min(3, len(urls))  # 3个并发下载
     
     def download_one(url: str, idx: int, total: int):
         print(f"\n{'='*60}")
@@ -966,12 +1060,19 @@ def batch_download(urls: List[str], save_dir: str, quality: str = "720P") -> Lis
             log(f"下载异常: {e}", "ERROR")
             return (url, f"异常: {e}", None, 0)
     
-    # 顺序下载（避免并发问题）
-    for i, url in enumerate(urls, 1):
-        url = url.strip()
-        if url:
-            result = download_one(url, i, len(urls))
-            results.append(result)
+    # 并发下载
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_url = {
+            executor.submit(download_one, url.strip(), i, len(urls)): url
+            for i, url in enumerate(urls, 1) if url.strip()
+        }
+        for future in as_completed(future_to_url):
+            try:
+                result = future.result()
+                results.append(result)
+            except Exception as e:
+                url = future_to_url[future]
+                results.append((url, f"异常: {e}", None, 0))
     
     # 统计结果
     success = sum(1 for _, status, _, _ in results if status == "成功")
@@ -1025,19 +1126,64 @@ ensure_deps()
 
 def main():
     print(f"""
-╔══════════════════════════════════════════════════════╗
-║          DL-Web CP - 增强版视频下载器 {VERSION}           ║
-║          支持: B站 | YouTube | 抖音 | 直链              ║
-║          功能: 代理加速 | 断点续传 | 并发下载             ║
-╚══════════════════════════════════════════════════════╝
+╔══════════════════════════════════════════════════════════════╗
+║                                                              ║
+║     DL-Web CP - 增强版视频下载器 {VERSION}                      ║
+║     支持: B站 | YouTube | 抖音 | 直链                           ║
+║     功能: 稳定代理 | 断点续传 | 并发下载 | 智能定位              ║
+║                                                              ║
+╚══════════════════════════════════════════════════════════════╝
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  ⚠️  重要提示 / IMPORTANT
+  在使用本软件之前，请务必查看 README 文档：
+  Before using this software, please read the README first:
+  
+  📖 中文文档: README.md
+  📖 English:   README_EN.md
+  
+  包含: 安装说明、使用教程、常见问题解答
+  
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 """)
+    
+    # 询问用户是否已阅读 README
+    try:
+        ack = input("您是否已阅读 README 文档？(y=是/n=否，继续使用请输入y): ").strip().lower()
+        if ack != 'y':
+            print("\n" + "="*60)
+            print("📖 请先查看 README 文档获取详细使用说明！")
+            print("📖 Please read the README documentation for detailed instructions!")
+            print("📖")
+            print("📖 中文说明:")
+            print("📖   1. 解压下载的压缩包")
+            print("📖   2. 双击 webcp_signing.cer 安装签名证书")
+            print("📖   3. 查看 README.md 了解详细使用方法")
+            print("📖   4. 确认后再次运行本程序")
+            print("📖")
+            print("📖 English:")
+            print("📖   1. Extract the downloaded archive")
+            print("📖   2. Double-click webcp_signing.cer to install the signing certificate")
+            print("📖   3. Check README_EN.md for detailed usage")
+            print("📖   4. Re-run this program after confirmation")
+            print("="*60)
+            try:
+                input("\n按回车键退出...")
+            except:
+                pass
+            sys.exit(0)
+    except (EOFError, KeyboardInterrupt):
+        print("\n再见！")
+        sys.exit(0)
     
     while True:
         print("""
 请选择操作:
   [1] 单个视频下载
-  [2] 批量视频下载
-  [3] 初始化代理池（用于外网加速）
+  [2] 批量视频下载（支持并发）
+  [3] 初始化代理池（首次使用必选！用于外网加速）
+  [4] 查看已使用的代理
   [0] 退出
 """)
         try:
@@ -1134,13 +1280,33 @@ def main():
             )
         
         elif choice == "3":
-            print("\n初始化代理池（用于加速外网视频下载）...")
-            print("提示：这可能需要 10-30 秒，请耐心等待...")
+            print("\n" + "="*60)
+            print("初始化代理池（用于加速外网视频下载）")
+            print("提示：这可能需要 20-40 秒，请耐心等待...")
+            print("="*60)
             PROXY_POOL.initialize()
             if PROXY_POOL.best_proxy:
-                print(f"代理池就绪！当前最优代理: {PROXY_POOL.best_proxy.url}")
+                print(f"\n✅ 代理池就绪！当前最优代理: {PROXY_POOL.best_proxy.host}:{PROXY_POOL.best_proxy.port}")
+                print(f"   可用代理数量: {len(PROXY_POOL.proxies)}")
+                print("   现在可以下载 YouTube 等外网视频了！")
             else:
-                print("未找到可用代理，将使用直连下载。")
+                print("\n⚠️ 所有代理均不可用，将使用直连下载。")
+                print("   建议检查网络连接或稍后重试。")
+        
+        elif choice == "4":
+            if not PROXY_POOL.proxies:
+                print("\n代理池尚未初始化。请先选择 [3] 初始化代理池。")
+            else:
+                print(f"\n当前可用代理 ({len(PROXY_POOL.proxies)} 个):")
+                print("-" * 50)
+                for i, p in enumerate(PROXY_POOL.proxies[:10], 1):
+                    status = "✅" if p.latency < 5 else "⚠️"
+                    print(f"  {status} {i}. {p.host}:{p.port} (延迟: {p.latency:.2f}s, 成功: {p.success_count})")
+                if len(PROXY_POOL.proxies) > 10:
+                    print(f"  ... 还有 {len(PROXY_POOL.proxies) - 10} 个")
+                print("-" * 50)
+                if PROXY_POOL.best_proxy:
+                    print(f"🏆 最优: {PROXY_POOL.best_proxy.host}:{PROXY_POOL.best_proxy.port}")
         
         else:
             print("无效选项，请重新输入")
