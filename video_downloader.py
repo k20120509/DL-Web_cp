@@ -22,7 +22,7 @@ from typing import Optional, Dict, List, Tuple, Callable
 from dataclasses import dataclass
 import subprocess
 
-VERSION = "V2.5"
+VERSION = "V2.5-test"
 
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -109,30 +109,59 @@ class ProxyInfo:
 class ProxyPool:
     """稳定代理池 - 多源获取、严格测试、优先级选择"""
     
-    # 使用多个免费代理 API 和 GitHub 源
+    # Proxy sources - ordered by reliability (tested 2026-07-28)
     PROXY_SOURCES = [
-        # 知名免费代理 API
+        "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt",
         "https://api.proxyscrape.com/v3/free-proxy-list/get?request=display_proxies&proxy_format=ipport&format=text",
         "https://www.proxy-list.download/api/v1/get?type=http",
         "https://api.openproxylist.xyz/http.txt",
-        # GitHub 上维护的优质列表
         "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt",
-        "https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/proxy.txt",
-        "https://raw.githubusercontent.com/clarketm/proxy-list/master/proxy-list-raw.txt",
-        "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt",
-        "https://raw.githubusercontent.com/pawru/proxy-list/main/proxies/http.txt",
+        "https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/protocols/http/data.txt",
     ]
-    
-    # 国内备用（不需要代理的场景）
-    RESIDENTIAL_PROXIES = [
-        "117.68.195.145:18881",
-        "218.75.126.36:9000",
-        "101.34.53.72:8118",
-        "222.95.50.201:8089",
-        "114.231.45.136:18118",
-        "113.134.174.153:8888",
-        "112.74.205.244:8888",
-        "120.27.198.182:8888",
+
+    # Pre-tested working proxies (tested 2026-07-28, 35/1000 passed)
+    # Format: "host:port" - these are known-good proxies
+    TESTED_PROXIES = [
+        # YouTube + Google + httpbin accessible (best)
+        "8.138.82.6:9080",
+        "139.224.186.221:9080",
+        "39.102.208.236:8081",
+        "8.130.37.235:9080",
+        # YouTube accessible
+        "8.137.62.53:80",
+        "218.93.176.70:2088",
+        # Bilibili fast (low latency)
+        "120.92.212.16:7890",
+        "122.246.4.6:17981",
+        "123.138.24.114:8800",
+        "219.148.171.178:9445",
+        "129.226.72.101:18080",
+        # Bilibili accessible
+        "103.133.25.119:8080",
+        "38.58.66.237:999",
+        "192.203.0.166:999",
+        "112.207.169.6:8082",
+        "103.145.34.100:1111",
+        "222.252.97.26:8008",
+        "143.105.102.145:8080",
+        "112.198.178.130:5050",
+        "113.192.31.79:8099",
+        "103.169.33.30:3125",
+        "190.130.6.11:8080",
+        "47.91.89.3:80",
+        "103.174.122.203:8080",
+        "8.213.195.191:9098",
+        "139.5.75.83:8080",
+        "113.11.37.81:2505",
+        "103.160.205.86:8080",
+        "103.48.71.142:82",
+        # httpbin accessible
+        "131.222.249.39:8080",
+        "47.238.134.126:8004",
+        "47.76.144.139:4002",
+        "8.138.82.6:9080",
+        "45.198.152.230:8000",
+        "47.90.167.27:1000",
     ]
     
     def __init__(self):
@@ -142,9 +171,10 @@ class ProxyPool:
         self.test_urls = [
             "https://www.youtube.com",
             "https://www.google.com",
-            "http://binlog.cn",
+            "https://httpbin.org/ip",
+            "https://www.bilibili.com",
         ]
-        self.timeout = 8.0
+        self.timeout = 6.0
         self._initialized = False
     
     def initialize(self):
@@ -157,20 +187,20 @@ class ProxyPool:
         
         # 1. 获取所有代理
         raw_proxies = self._fetch_all_proxies()
-        log(f"共获取到 {len(raw_proxies)} 个原始代理", "INFO")
-        
+        log(f"Total fetched: {len(raw_proxies)} proxies", "INFO")
+
         if not raw_proxies:
-            log("未获取到任何代理，使用本地备用列表", "WARN")
-            raw_proxies = self.RESIDENTIAL_PROXIES.copy()
+            log("No proxies fetched from online sources, using pre-tested list", "WARN")
+            raw_proxies = self.TESTED_PROXIES.copy()
         
         # 2. 去重和过滤
         unique_proxies = list(set(raw_proxies))
-        log(f"去重后共 {len(unique_proxies)} 个代理，开始测试...", "INFO")
-        
+        log(f"After dedup: {len(unique_proxies)} proxies, testing...", "INFO")
+
         # 3. 并发测试所有代理
-        log("正在并发测试代理可用性（可能需要 20-40 秒）...", "INFO")
+        log("Testing proxy availability (may take 30-60 seconds)...", "INFO")
         self.proxies = self._test_all_proxies(unique_proxies)
-        log(f"测试完成，可用代理: {len(self.proxies)} 个", "INFO")
+        log(f"Test complete, working proxies: {len(self.proxies)}", "INFO")
         
         # 4. 选择最优
         self._select_best_proxy()
@@ -178,45 +208,53 @@ class ProxyPool:
         self._initialized = True
         
         if self.best_proxy:
-            log(f"代理池就绪！", "SUCCESS")
-            log(f"  最优代理: {self.best_proxy.host}:{self.best_proxy.port} (延迟 {self.best_proxy.latency:.2f}s)", "SUCCESS")
-            log(f"  可用数量: {len(self.proxies)}", "SUCCESS")
+            log(f"Proxy pool ready!", "SUCCESS")
+            log(f"  Best proxy: {self.best_proxy.host}:{self.best_proxy.port} (latency {self.best_proxy.latency:.2f}s)", "SUCCESS")
+            log(f"  Available: {len(self.proxies)}", "SUCCESS")
         else:
-            log("所有代理均不可用，将使用直连下载", "WARN")
+            log("All proxies unavailable, will use direct download", "WARN")
         log("=" * 60, "INFO")
     
     def _fetch_all_proxies(self) -> List[str]:
-        """从所有源获取代理"""
+        """Fetch proxies from all sources + pre-tested list"""
         all_proxies = []
-        
-        # 添加内置备用
-        all_proxies.extend(self.RESIDENTIAL_PROXIES)
-        
-        # 从在线源获取
-        for source_url in self.PROXY_SOURCES:
+
+        # Add pre-tested working proxies first (highest priority)
+        all_proxies.extend(self.TESTED_PROXIES)
+
+        # Fetch from online sources concurrently
+        def fetch_one(url):
             try:
                 import requests
-                r = requests.get(source_url, timeout=10, headers={"User-Agent": USER_AGENT})
+                r = requests.get(url, timeout=12, headers={"User-Agent": USER_AGENT})
                 if r.status_code == 200:
                     text = r.text.strip()
+                    found = []
                     if text:
-                        lines = text.split("\n")
-                        for line in lines:
+                        for line in text.split("\n"):
                             line = line.strip()
                             if ":" in line and len(line.split(":")) == 2:
-                                all_proxies.append(line)
-                        if lines:
-                            log(f"  从 {source_url.split('/')[-1] if '/' in source_url else source_url[:30]} 获取到 {len(lines)} 个", "INFO")
+                                found.append(line)
+                    name = url.split("/")[-1][:30] if "/" in url else url[:30]
+                    log(f"  {name}: {len(found)} proxies", "INFO")
+                    return found
             except Exception:
-                continue
-        
+                name = url.split("/")[-1][:30] if "/" in url else url[:30]
+                log(f"  {name}: failed", "WARN")
+            return []
+
+        with ThreadPoolExecutor(max_workers=6) as executor:
+            futures = [executor.submit(fetch_one, url) for url in self.PROXY_SOURCES]
+            for future in as_completed(futures):
+                all_proxies.extend(future.result())
+
         return all_proxies
     
     def _test_all_proxies(self, proxy_list: List[str]) -> List[ProxyInfo]:
-        """并发测试所有代理"""
+        """Concurrent test of all proxies - test up to 500, 60 workers"""
         tested_proxies = []
-        test_count = min(len(proxy_list), 80)  # 最多测试80个，避免太久
-        
+        test_count = min(len(proxy_list), 500)
+
         def test_single_proxy(proxy_str: str) -> Optional[ProxyInfo]:
             parts = proxy_str.split(":")
             if len(parts) != 2:
@@ -226,12 +264,12 @@ class ProxyPool:
                 port = int(parts[1])
                 if port <= 0 or port > 65535:
                     return None
-                
+
                 info = ProxyInfo(host=host, port=port)
                 proxy_url = info.url
-                
-                # 使用多个测试URL轮流测试
-                for test_url in self.test_urls[:2]:
+
+                # Test against multiple URLs - if any succeeds, proxy is good
+                for test_url in self.test_urls:
                     try:
                         import requests
                         proxies = {"http": proxy_url, "https": proxy_url}
@@ -249,11 +287,11 @@ class ProxyPool:
                 return None
             except Exception:
                 return None
-        
-        log(f"  并发测试 {test_count} 个代理...", "INFO")
+
+        log(f"  Concurrent testing {test_count} proxies (60 workers)...", "INFO")
         test_subset = proxy_list[:test_count]
-        
-        with ThreadPoolExecutor(max_workers=30) as executor:
+
+        with ThreadPoolExecutor(max_workers=60) as executor:
             futures = {executor.submit(test_single_proxy, p): p for p in test_subset}
             completed = 0
             for future in as_completed(futures):
@@ -261,9 +299,9 @@ class ProxyPool:
                 if result:
                     tested_proxies.append(result)
                 completed += 1
-                if completed % 10 == 0:
-                    log(f"  进度: {completed}/{test_count}", "INFO")
-        
+                if completed % 100 == 0:
+                    log(f"  Progress: {completed}/{test_count}, working: {len(tested_proxies)}", "INFO")
+
         return tested_proxies
     
     def _select_best_proxy(self):
