@@ -22,7 +22,7 @@ from typing import Optional, Dict, List, Tuple, Callable
 from dataclasses import dataclass
 import subprocess
 
-VERSION = "V2.5-test"
+VERSION = "V2.5.1-test"
 
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -92,31 +92,47 @@ class ProxyInfo:
     last_check: float = 0.0
     success_count: int = 0
     fail_count: int = 0
-    
+    can_youtube: bool = False    # 是否能访问 YouTube
+    can_bilibili: bool = False   # 是否能访问 Bilibili
+
     @property
     def url(self) -> str:
         return f"{self.protocol}://{self.host}:{self.port}"
-    
+
     @property
     def score(self) -> float:
-        """计算代理得分（越低越好）"""
+        """计算代理得分（越低越好）- YouTube 可访问的代理优先"""
         if self.success_count + self.fail_count == 0:
             return 999.0
         success_rate = self.success_count / (self.success_count + self.fail_count)
-        return self.latency / max(success_rate, 0.1)
+        base = self.latency / max(success_rate, 0.1)
+        # YouTube 代理优先（降低得分）
+        if self.can_youtube:
+            base *= 0.3
+        elif self.can_bilibili:
+            base *= 0.7
+        return base
 
 
 class ProxyPool:
     """稳定代理池 - 多源获取、严格测试、优先级选择"""
     
-    # Proxy sources - ordered by reliability (tested 2026-07-28)
+    # Proxy sources - 8+ sources including foreign proxies for YouTube
     PROXY_SOURCES = [
+        # 主要源
+        "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt",
         "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt",
         "https://api.proxyscrape.com/v3/free-proxy-list/get?request=display_proxies&proxy_format=ipport&format=text",
         "https://www.proxy-list.download/api/v1/get?type=http",
         "https://api.openproxylist.xyz/http.txt",
-        "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt",
         "https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/protocols/http/data.txt",
+        # 额外源（含更多国外代理）
+        "https://raw.githubusercontent.com/roosterkid/openproxylist/main/HTTPS_RAW.txt",
+        "https://raw.githubusercontent.com/MuRongPI/ProxyList/main/https.txt",
+        "https://raw.githubusercontent.com/sunny2017/ProxyList/master/https.txt",
+        "https://raw.githubusercontent.com/EliasOal/proxy-list/master/proxy-list.txt",
+        "https://raw.githubusercontent.com/clarketm/proxy-list/master/proxy-list-raw.txt",
+        "https://raw.githubusercontent.com/Barthr/ProxyList/master/proxy-list.txt",
     ]
 
     # Pre-tested working proxies (tested 2026-07-28, 35/1000 passed)
@@ -168,13 +184,17 @@ class ProxyPool:
         self.proxies: List[ProxyInfo] = []
         self.lock = threading.Lock()
         self.best_proxy: Optional[ProxyInfo] = None
+        # 轻量测试 URL，单次请求响应快
+        # 顺序：先试 httpbin（最快），失败再试 Bilibili
         self.test_urls = [
-            "https://www.youtube.com",
-            "https://www.google.com",
             "https://httpbin.org/ip",
             "https://www.bilibili.com",
         ]
-        self.timeout = 6.0
+        self.timeout = 3.0           # 单代理超时（秒）
+        self.max_test = 1200         # 最大测试数
+        self.max_workers = 200       # 并发数
+        self.early_stop_count = 30   # 找到 N 个可用代理就停止
+        self.max_test_seconds = 50   # 测试阶段总时间上限（秒）
         self._initialized = False
     
     def initialize(self):
@@ -192,10 +212,21 @@ class ProxyPool:
         if not raw_proxies:
             log("No proxies fetched from online sources, using pre-tested list", "WARN")
             raw_proxies = self.TESTED_PROXIES.copy()
-        
-        # 2. 去重和过滤
-        unique_proxies = list(set(raw_proxies))
-        log(f"After dedup: {len(unique_proxies)} proxies, testing...", "INFO")
+
+        # 2. 去重但保持顺序 - pre-tested proxies first
+        seen = set()
+        unique_proxies = []
+        # Pre-tested proxies go first (they are already known to work)
+        for p in self.TESTED_PROXIES:
+            if p not in seen:
+                seen.add(p)
+                unique_proxies.append(p)
+        # Then add the rest
+        for p in raw_proxies:
+            if p not in seen:
+                seen.add(p)
+                unique_proxies.append(p)
+        log(f"After dedup: {len(unique_proxies)} proxies (pre-tested first)", "INFO")
 
         # 3. 并发测试所有代理
         log("Testing proxy availability (may take 30-60 seconds)...", "INFO")
@@ -206,11 +237,16 @@ class ProxyPool:
         self._select_best_proxy()
         
         self._initialized = True
-        
+
         if self.best_proxy:
+            yt = sum(1 for p in self.proxies if p.can_youtube)
+            bb = sum(1 for p in self.proxies if p.can_bilibili)
             log(f"Proxy pool ready!", "SUCCESS")
-            log(f"  Best proxy: {self.best_proxy.host}:{self.best_proxy.port} (latency {self.best_proxy.latency:.2f}s)", "SUCCESS")
-            log(f"  Available: {len(self.proxies)}", "SUCCESS")
+            log(f"  Best proxy: {self.best_proxy.host}:{self.best_proxy.port} "
+                f"(latency {self.best_proxy.latency:.2f}s, "
+                f"YouTube={'Y' if self.best_proxy.can_youtube else 'N'}, "
+                f"Bili={'Y' if self.best_proxy.can_bilibili else 'N'})", "SUCCESS")
+            log(f"  Total: {len(self.proxies)} | YouTube: {yt} | Bilibili: {bb}", "SUCCESS")
         else:
             log("All proxies unavailable, will use direct download", "WARN")
         log("=" * 60, "INFO")
@@ -251,9 +287,15 @@ class ProxyPool:
         return all_proxies
     
     def _test_all_proxies(self, proxy_list: List[str]) -> List[ProxyInfo]:
-        """Concurrent test of all proxies - test up to 500, 60 workers"""
-        tested_proxies = []
-        test_count = min(len(proxy_list), 500)
+        """并发测试所有代理 - 早停 + 总时长上限"""
+        import requests as _req
+        from concurrent.futures import wait, FIRST_COMPLETED
+
+        tested_proxies: List[ProxyInfo] = []
+        lock_local = threading.Lock()
+        test_count = min(len(proxy_list), self.max_test)
+        test_subset = proxy_list[:test_count]
+        deadline = time.time() + self.max_test_seconds
 
         def test_single_proxy(proxy_str: str) -> Optional[ProxyInfo]:
             parts = proxy_str.split(":")
@@ -267,51 +309,101 @@ class ProxyPool:
 
                 info = ProxyInfo(host=host, port=port)
                 proxy_url = info.url
+                proxies = {"http": proxy_url, "https": proxy_url}
+                headers = {"User-Agent": USER_AGENT}
 
-                # Test against multiple URLs - if any succeeds, proxy is good
-                for test_url in self.test_urls:
-                    try:
-                        import requests
-                        proxies = {"http": proxy_url, "https": proxy_url}
-                        start = time.time()
-                        r = requests.get(test_url, proxies=proxies, timeout=self.timeout, verify=False)
-                        elapsed = time.time() - start
-                        if r.status_code < 400:
+                best_latency = 999.0
+                passed = False
+
+                # 1) 先测 Bilibili（国内可访问，快）
+                try:
+                    start = time.time()
+                    r = _req.get("https://www.bilibili.com",
+                                 proxies=proxies, timeout=self.timeout,
+                                 verify=False, headers=headers)
+                    elapsed = time.time() - start
+                    if r.status_code < 400 and elapsed < 6.0:
+                        info.can_bilibili = True
+                        info.latency = elapsed
+                        info.success_count = 1
+                        info.last_check = time.time()
+                        best_latency = min(best_latency, elapsed)
+                        passed = True
+                except Exception:
+                    pass
+
+                # 2) 测 YouTube（外网，需要代理）
+                try:
+                    start = time.time()
+                    r = _req.get("https://www.youtube.com",
+                                 proxies=proxies, timeout=self.timeout,
+                                 verify=False, headers=headers)
+                    elapsed = time.time() - start
+                    if r.status_code < 400 and elapsed < 6.0:
+                        info.can_youtube = True
+                        if elapsed < best_latency:
                             info.latency = elapsed
-                            info.success_count += 1
-                            info.last_check = time.time()
-                            return info
-                    except Exception:
-                        continue
-                info.fail_count += 1
+                        info.last_check = time.time()
+                        passed = True
+                except Exception:
+                    pass
+
+                if passed:
+                    info.success_count = 1
+                    return info
                 return None
             except Exception:
                 return None
 
-        log(f"  Concurrent testing {test_count} proxies (60 workers)...", "INFO")
-        test_subset = proxy_list[:test_count]
+        log(f"  并发测试 {test_count} 个代理 (并发 {self.max_workers}, 上限 {self.max_test_seconds}s)...", "INFO")
 
-        with ThreadPoolExecutor(max_workers=60) as executor:
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
             futures = {executor.submit(test_single_proxy, p): p for p in test_subset}
             completed = 0
-            for future in as_completed(futures):
-                result = future.result()
-                if result:
-                    tested_proxies.append(result)
-                completed += 1
-                if completed % 100 == 0:
-                    log(f"  Progress: {completed}/{test_count}, working: {len(tested_proxies)}", "INFO")
+
+            while futures:
+                # 检查是否到达截止时间或早停
+                now = time.time()
+                with lock_local:
+                    cur_working = len(tested_proxies)
+                if now > deadline:
+                    log(f"  时间上限到达，停止剩余测试 (已完成 {completed}/{test_count})", "WARN")
+                    # 取消未完成的 future（已运行的不一定能取消，但试一下）
+                    for f in futures:
+                        f.cancel()
+                    break
+                if cur_working >= self.early_stop_count and completed >= self.early_stop_count * 4:
+                    log(f"  已找到 {cur_working} 个可用代理，提前停止", "SUCCESS")
+                    for f in futures:
+                        f.cancel()
+                    break
+
+                # 等下一个完成（最多等 2 秒，便于检查 deadline）
+                done, futures = wait(futures, timeout=2.0, return_when=FIRST_COMPLETED)
+                for f in done:
+                    try:
+                        result = f.result()
+                    except Exception:
+                        result = None
+                    if result:
+                        with lock_local:
+                            tested_proxies.append(result)
+                    completed += 1
+                    if completed % 50 == 0:
+                        with lock_local:
+                            cur = len(tested_proxies)
+                        log(f"  进度: {completed}/{test_count}, 可用: {cur}", "INFO")
 
         return tested_proxies
     
     def _select_best_proxy(self):
-        """选择最优代理"""
+        """选择最优代理 - YouTube 可访问的优先"""
         if not self.proxies:
             self.best_proxy = None
             return
-        
-        # 按延迟排序
-        self.proxies.sort(key=lambda p: p.latency)
+
+        # 按 score 排序（YouTube 代理优先）
+        self.proxies.sort(key=lambda p: p.score)
         self.best_proxy = self.proxies[0] if self.proxies else None
     
     def get_proxy(self) -> Optional[Dict]:
